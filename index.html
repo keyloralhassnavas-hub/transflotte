@@ -2597,7 +2597,11 @@ function filterTable(tbodyId, q){
 }
 
 // Ouvrir / fermer modal
-function openModal(id){ const el=document.getElementById(id); if(el) el.classList.add('open'); }
+function openModal(id){
+  // Compte suspendu (lecture seule) : consultation autorisée, création/modification bloquée.
+  if(CLOUD && CLOUD.readOnly){ showToast('🔒 Compte en lecture seule — vous pouvez consulter vos données mais pas les modifier. Contactez le propriétaire de la plateforme.','amber',5000); return; }
+  const el=document.getElementById(id); if(el) el.classList.add('open');
+}
 function closeModal(id){ const el=document.getElementById(id); if(el) el.classList.remove('open'); }
 
 // ── Confirmation en modale interne (remplace window.confirm(), peu fiable dans
@@ -3330,14 +3334,14 @@ function nav(page){
 
   const titles={dashboard:'Tableau de bord',flottes:'Gestion des Flottes',camions:'Gestion des Camions',
     chauffeurs:'Gestion des Chauffeurs',voyages:'Registre des Voyages',livraisons:'Suivi des Livraisons',
-    paiements:'Gestion des Paiements',salaires:'Salaires & Primes',pieces:'Gestion du Stock',rapports:'Rapports & Exports PDF',comptes:'Gestion des Comptes',rh:'Ressources Humaines',maintenance:'Maintenance Camions',documents:'Documents — Conformité',entreprises:'Entreprises — Vue propriétaire'};
+    paiements:'Gestion des Paiements',salaires:'Salaires & Primes',pieces:'Gestion du Stock',rapports:'Rapports & Exports PDF',comptes:'Gestion des Comptes',rh:'Ressources Humaines',maintenance:'Maintenance Camions',documents:'Documents — Conformité',entreprises:'Entreprises — Vue propriétaire',facturation:'Facturation — Vue propriétaire'};
   document.getElementById('pageTitle').textContent=titles[page]||page;
 
   const renders={
     dashboard:renderDashboard,flottes:renderFlottes,camions:renderCamions,
     chauffeurs:renderChauffeurs,voyages:renderVoyages,livraisons:renderLivraisons,
     paiements:renderPaiements,salaires:renderSalaires,pieces:renderPieces,rapports:renderRapports
-  ,comptes:renderComptes,documents:renderDocuments,rh:renderRH,maintenance:renderMaintenance,entreprises:renderEntreprisesOwner};
+  ,comptes:renderComptes,documents:renderDocuments,rh:renderRH,maintenance:renderMaintenance,entreprises:renderEntreprisesOwner,facturation:renderFacturationOwner};
   if(renders[page]) renders[page]();
 }
 
@@ -6075,6 +6079,10 @@ const LAST_SYNC_KEY = 'transflotte_last_sync';
 
 // ── Sauvegarder DB dans localStorage ──
 function saveDB(){
+  // Compte suspendu (lecture seule) : verrou côté application — aucune écriture
+  // n'est envoyée à Supabase. La base de données applique aussi ce verrou de
+  // son côté (RLS), cette vérification est une protection supplémentaire.
+  if(CLOUD && CLOUD.readOnly) return;
   // Session "entreprise cloud" : les données vivent sur Supabase, pas dans le
   // stockage local du navigateur (qui reste réservé au compte local S3G).
   if(CLOUD){ cloudSaveDB(); return; }
@@ -6432,16 +6440,35 @@ async function cloudBootSession(user, fallbackPrenom, fallbackNom){
     return;
   }
   let entrepriseNom = '';
+  let entrepriseStatut = 'actif';
+  let entrepriseTarif = 0;
   if(profile.entreprise_id){
-    const {data: ent} = await mt.from('entreprises').select('nom').eq('id', profile.entreprise_id).single();
+    const {data: ent} = await mt.from('entreprises').select('nom,statut,tarif_camion_gnf').eq('id', profile.entreprise_id).single();
     entrepriseNom = ent ? ent.nom : '';
+    entrepriseStatut = (ent && ent.statut) || 'actif';
+    entrepriseTarif = (ent && ent.tarif_camion_gnf) || 0;
   }
+
+  // Compte définitivement bloqué (le propriétaire de la plateforme n'est jamais bloqué,
+  // même si son propre compte entreprise l'était par erreur) : accès refusé,
+  // données conservées mais inaccessibles.
+  if(entrepriseStatut === 'bloque' && !profile.is_owner){
+    showBlockedScreen(entrepriseNom);
+    try { mt.auth.signOut(); } catch(e){}
+    CLOUD = null;
+    return;
+  }
+
   CLOUD = {
     userId: user.id,
     email: user.email,
     entrepriseId: profile.entreprise_id,
     entrepriseNom: entrepriseNom,
+    entrepriseStatut: entrepriseStatut,
+    tarifCamion: entrepriseTarif,
     isOwner: !!profile.is_owner,
+    // Suspension temporaire : lecture seule (consultation possible, écriture bloquée).
+    readOnly: (entrepriseStatut === 'suspendu' && !profile.is_owner),
     prenom: profile.prenom || fallbackPrenom || '',
     nom: profile.nom || fallbackNom || '',
     role: profile.role || 'admin',
@@ -6471,7 +6498,39 @@ async function cloudBootSession(user, fallbackPrenom, fallbackNom){
   try { renderCloudBadge(); } catch(e){}
   if(CLOUD.isOwner){
     try { setupOwnerNav(); } catch(e){}
+    try { setupFacturationNav(); } catch(e){}
   }
+  if(CLOUD.readOnly){
+    try { renderReadOnlyBanner(); } catch(e){}
+  }
+}
+
+// ── Écran plein-écran affiché à un compte définitivement bloqué ──
+function showBlockedScreen(nom){
+  const existing = document.getElementById('blocked-screen');
+  if(existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'blocked-screen';
+  div.style.cssText = 'position:fixed;inset:0;background:#1C2833;z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
+  div.innerHTML = '<div style="background:#fff;border-radius:14px;padding:40px 36px;max-width:420px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.3)">'
+    + '<div style="font-size:48px;margin-bottom:16px">🔒</div>'
+    + '<h2 style="color:#C0392B;margin:0 0 12px;font-size:19px">Compte bloqué</h2>'
+    + '<p style="color:#5D6D7E;font-size:14.5px;line-height:1.6;margin:0 0 10px">L\'accès de <b>'+(nom||'votre entreprise')+'</b> à TransFlotte a été définitivement suspendu.</p>'
+    + '<p style="color:#5D6D7E;font-size:13.5px;line-height:1.6">Vos données sont conservées. Contactez l\'administrateur de la plateforme pour plus d\'informations.</p>'
+    + '</div>';
+  document.body.appendChild(div);
+}
+
+// ── Bandeau permanent affiché à un compte suspendu (lecture seule) ──
+function renderReadOnlyBanner(){
+  if(document.getElementById('readonly-banner')) return;
+  const main = document.getElementById('main');
+  if(!main) return;
+  const div = document.createElement('div');
+  div.id = 'readonly-banner';
+  div.style.cssText = 'position:sticky;top:0;z-index:500;background:#FEF9E7;border-bottom:2px solid #F9CA6E;color:#B7770D;padding:9px 20px;font-size:13px;font-weight:600;text-align:center';
+  div.textContent = '🔒 Compte suspendu — Lecture seule : vous pouvez consulter vos données mais pas les modifier. Contactez le propriétaire de la plateforme.';
+  main.insertBefore(div, main.firstChild);
 }
 
 // ── Charge les données (DB) de l'entreprise connectée depuis Supabase ──
@@ -6571,14 +6630,148 @@ async function renderEntreprisesOwner(){
   const {data: ents, error} = await mt.from('entreprises').select('*').order('created_at', {ascending:false});
   if(error){ el.innerHTML = '<p style="color:#C0392B">Erreur de chargement : '+(error.message||JSON.stringify(error))+'</p>'; return; }
   if(!ents || !ents.length){ el.innerHTML = '<p style="padding:20px;color:var(--text-muted)">Aucune entreprise cliente pour le moment.</p>'; return; }
-  let html = '<table><thead><tr><th>Entreprise</th><th>Statut</th><th>Plan</th><th>Créée le</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Entreprise</th><th>Statut</th><th>Tarif / camion (GNF)</th><th>Créée le</th><th>Actions</th></tr></thead><tbody>';
   ents.forEach(function(e){
     const d = e.created_at ? new Date(e.created_at).toLocaleDateString('fr-FR') : '';
-    const badgeClass = e.statut==='actif' ? 'badge-green' : 'badge-red';
-    html += '<tr><td><b>'+e.nom+'</b></td><td><span class="badge '+badgeClass+'">'+e.statut+'</span></td><td>'+e.plan+'</td><td>'+d+'</td></tr>';
+    const badgeClass = e.statut==='actif' ? 'badge-green' : (e.statut==='suspendu' ? 'badge-amber' : 'badge-red');
+    const statutLabel = e.statut==='actif' ? 'Actif' : (e.statut==='suspendu' ? 'Suspendu (lecture seule)' : 'Bloqué');
+    const nomEsc = (e.nom||'').replace(/'/g,"\\'");
+    html += '<tr>';
+    html += '<td><b>'+e.nom+'</b></td>';
+    html += '<td><span class="badge '+badgeClass+'">'+statutLabel+'</span></td>';
+    html += '<td><input type="number" min="0" step="1000" id="tarif-'+e.id+'" value="'+(e.tarif_camion_gnf||0)+'" style="width:120px;padding:6px 8px;border:1.5px solid #D5D8DC;border-radius:6px;font-size:13px"> <button class="btn btn-sm" onclick="ownerSaveTarif(\''+e.id+'\')">💾 Enregistrer</button></td>';
+    html += '<td>'+d+'</td>';
+    html += '<td style="display:flex;gap:6px;flex-wrap:wrap">';
+    if(e.statut!=='actif') html += '<button class="btn btn-sm" style="background:#D5F5E3;color:#1E8449" onclick="ownerSetStatut(\''+e.id+'\',\'actif\',\''+nomEsc+'\')">Réactiver</button>';
+    if(e.statut!=='suspendu') html += '<button class="btn btn-sm" style="background:#FEF9E7;color:#B7770D" onclick="ownerSetStatut(\''+e.id+'\',\'suspendu\',\''+nomEsc+'\')">Suspendre</button>';
+    if(e.statut!=='bloque') html += '<button class="btn btn-sm" style="background:#FDEDEC;color:#C0392B" onclick="ownerSetStatut(\''+e.id+'\',\'bloque\',\''+nomEsc+'\')">Bloquer définitivement</button>';
+    html += '</td></tr>';
   });
   html += '</tbody></table>';
   el.innerHTML = html;
+}
+
+// ── Enregistre le tarif mensuel par camion d'une entreprise (propriétaire) ──
+async function ownerSaveTarif(entrepriseId){
+  const input = document.getElementById('tarif-'+entrepriseId);
+  if(!input) return;
+  const val = parseFloat(input.value)||0;
+  const {error} = await mt.from('entreprises').update({tarif_camion_gnf: val}).eq('id', entrepriseId);
+  if(error){ showToast('Erreur : '+(error.message||JSON.stringify(error)),'red',4000); return; }
+  showToast('✅ Tarif mis à jour','green',3000);
+}
+
+// ── Change le statut d'une entreprise cliente : actif / suspendu (lecture seule) / bloque (définitif) ──
+function ownerSetStatut(entrepriseId, statut, nom){
+  const messages = {
+    actif: 'Réactiver "'+nom+'" ? L\'entreprise retrouvera un accès complet immédiatement.',
+    suspendu: 'Suspendre "'+nom+'" ? L\'entreprise pourra encore se connecter et consulter ses données, mais plus rien créer ni modifier, jusqu\'à réactivation.',
+    bloque: 'ATTENTION — Bloquer définitivement "'+nom+'" ? Ce compte ne pourra plus jamais se connecter. Ses données resteront conservées dans la base.'
+  };
+  appConfirm(messages[statut]||'Confirmer ?', async function(){
+    const {error} = await mt.from('entreprises').update({statut: statut}).eq('id', entrepriseId);
+    if(error){ showToast('Erreur : '+(error.message||JSON.stringify(error)),'red',4000); return; }
+    showToast('✅ Statut mis à jour','green',3000);
+    renderEntreprisesOwner();
+  });
+}
+
+// ── Vue "Facturation" : liste des factures mensuelles de toutes les entreprises ──
+function setupFacturationNav(){
+  if(document.getElementById('sb-item-facturation')) return;
+  const sidebar = document.getElementById('sidebar');
+  const firstSection = sidebar ? sidebar.querySelector('.sb-section') : null;
+  if(!firstSection) return;
+  const item = document.createElement('a');
+  item.id = 'sb-item-facturation';
+  item.className = 'sb-item';
+  item.href = 'javascript:void(0)';
+  item.setAttribute('onclick', "nav('facturation')");
+  item.innerHTML = '🧾 Facturation (vue propriétaire)';
+  firstSection.insertBefore(item, firstSection.firstChild);
+
+  if(!document.getElementById('page-facturation')){
+    const main = document.getElementById('content') || document.body;
+    const page = document.createElement('div');
+    page.id = 'page-facturation';
+    page.className = 'page';
+    page.innerHTML = `
+      <div style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div>
+          <h2 style="font-size:16px;font-weight:600">🧾 Facturation des entreprises clientes</h2>
+          <p style="font-size:12.5px;color:var(--text-muted);margin-top:4px">Facture = nombre de camions actifs × tarif fixé pour chaque entreprise. Générée automatiquement le 1er de chaque mois — l'envoi au client reste manuel (fait par vous).</p>
+        </div>
+        <button class="btn" onclick="ownerGenererFactures()">⚙️ Générer les factures du mois</button>
+      </div>
+      <div class="card">
+        <div class="card-header"><h3>Factures</h3><button class="btn btn-sm" onclick="exportFacturesPDF()">📄 Exporter PDF</button></div>
+        <div class="card-body" style="padding:0">
+          <div id="facturation-owner-body" style="padding:20px;color:var(--text-muted)">Chargement...</div>
+        </div>
+      </div>
+    `;
+    main.appendChild(page);
+  }
+}
+
+let _lastFacturesLoaded = [];
+
+async function renderFacturationOwner(){
+  const el = document.getElementById('facturation-owner-body');
+  if(!el || !mt || !CLOUD || !CLOUD.isOwner) return;
+  el.innerHTML = 'Chargement...';
+  const {data: facs, error} = await mt.from('factures').select('*,entreprises(nom)').order('mois', {ascending:false});
+  if(error){ el.innerHTML = '<p style="color:#C0392B">Erreur de chargement : '+(error.message||JSON.stringify(error))+'</p>'; return; }
+  _lastFacturesLoaded = facs||[];
+  if(!facs || !facs.length){ el.innerHTML = '<p style="padding:20px;color:var(--text-muted)">Aucune facture générée pour le moment. Cliquez sur « Générer les factures du mois ».</p>'; return; }
+  let html = '<table><thead><tr><th>Entreprise</th><th>Mois</th><th>Camions</th><th>Tarif unitaire</th><th>Montant</th><th>Statut</th><th>Actions</th></tr></thead><tbody>';
+  facs.forEach(function(f){
+    const mois = f.mois ? new Date(f.mois).toLocaleDateString('fr-FR',{month:'long',year:'numeric'}) : '';
+    const nomEnt = (f.entreprises && f.entreprises.nom) || '—';
+    const statutBadge = {genere:'badge-blue',envoyee:'badge-amber',payee:'badge-green',annulee:'badge-red'}[f.statut]||'badge-gray';
+    const statutLabel = {genere:'Générée',envoyee:'Envoyée',payee:'Payée',annulee:'Annulée'}[f.statut]||f.statut;
+    html += '<tr><td>'+nomEnt+'</td><td>'+mois+'</td><td>'+f.nb_camions+'</td><td>'+fmtGNF(f.tarif_unitaire_gnf)+'</td><td><b>'+fmtGNF(f.montant_total_gnf)+'</b></td>';
+    html += '<td><span class="badge '+statutBadge+'">'+statutLabel+'</span></td>';
+    html += '<td style="display:flex;gap:6px;flex-wrap:wrap">';
+    if(f.statut==='genere') html += '<button class="btn btn-sm" onclick="ownerMarquerFacture(\''+f.id+'\',\'envoyee\')">Marquer envoyée</button>';
+    if(f.statut==='envoyee') html += '<button class="btn btn-sm" style="background:#D5F5E3;color:#1E8449" onclick="ownerMarquerFacture(\''+f.id+'\',\'payee\')">Marquer payée</button>';
+    html += '</td></tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+// ── Déclenche la génération des factures du mois (calcul côté base de données) ──
+function ownerGenererFactures(){
+  appConfirm('Générer les factures du mois pour toutes les entreprises actives et suspendues (les comptes bloqués ne sont pas facturés) ?', async function(){
+    const {error} = await mt.rpc('generer_factures_mois', {});
+    if(error){ showToast('Erreur : '+(error.message||JSON.stringify(error)),'red',5000); return; }
+    showToast('✅ Factures générées','green',3000);
+    renderFacturationOwner();
+  });
+}
+
+// ── Marque une facture comme envoyée ou payée ──
+async function ownerMarquerFacture(factureId, statut){
+  const patch = {statut: statut};
+  if(statut==='envoyee') patch.date_envoi = new Date().toISOString();
+  if(statut==='payee') patch.date_paiement = new Date().toISOString();
+  const {error} = await mt.from('factures').update(patch).eq('id', factureId);
+  if(error){ showToast('Erreur : '+(error.message||JSON.stringify(error)),'red',4000); return; }
+  showToast('✅ Facture mise à jour','green',3000);
+  renderFacturationOwner();
+}
+
+// ── Export PDF de la liste des factures affichées ──
+function exportFacturesPDF(){
+  const facs = _lastFacturesLoaded||[];
+  const rows = facs.map(function(f){
+    const mois = f.mois ? new Date(f.mois).toLocaleDateString('fr-FR',{month:'long',year:'numeric'}) : '';
+    const nomEnt = (f.entreprises && f.entreprises.nom) || '—';
+    const statutLabel = {genere:'Générée',envoyee:'Envoyée',payee:'Payée',annulee:'Annulée'}[f.statut]||f.statut;
+    return [nomEnt, mois, f.nb_camions, fmtGNF(f.tarif_unitaire_gnf), fmtGNF(f.montant_total_gnf), statutLabel];
+  });
+  MiniPDF.openReport('Facturation — Entreprises clientes','TransFlotte — Plateforme de gestion de flotte',rows,['Entreprise','Mois','Camions','Tarif unitaire','Montant total','Statut']);
 }
 
 // ══════════════════════════════════════════
