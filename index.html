@@ -3626,7 +3626,15 @@ function affecterCamion(){
   const camId=+v('aff-camion-sel');const fid=selectedFlotteId;
   if(!camId||!fid) return;
   const cam=DB.camions.find(c=>c.id===camId);
-  if(cam){ cam.flotte=fid; }
+  if(!cam) return;
+  // Un camion déjà affecté à une flotte ne peut plus être affecté à une autre :
+  // il faut d'abord le retirer de sa flotte actuelle.
+  if(cam.flotte){
+    const fAct=DB.flottes.find(f=>f.id===cam.flotte);
+    showToast('⚠️ Ce camion est déjà affecté à '+(fAct?fAct.nom:'une flotte')+' — retirez-le d\'abord avant de le réaffecter','red',5000);
+    return;
+  }
+  cam.flotte=fid;
   closeModal('modalAffecterCamion');
   renderFlottes(); saveDB();
   showToast('✅ Camion affecté à '+DB.flottes.find(f=>f.id===fid)?.nom,'green');
@@ -3635,7 +3643,15 @@ function affecterChauffeur(){
   const chId=+v('aff-chauf-sel');const fid=selectedFlotteId;
   if(!chId||!fid) return;
   const ch=DB.chauffeurs.find(c=>c.id===chId);
-  if(ch){ ch.flotte=fid; }
+  if(!ch) return;
+  // Un chauffeur déjà affecté à une flotte ne peut plus être affecté à une autre :
+  // il faut d'abord le retirer de sa flotte actuelle.
+  if(ch.flotte){
+    const fAct=DB.flottes.find(f=>f.id===ch.flotte);
+    showToast('⚠️ Ce chauffeur est déjà affecté à '+(fAct?fAct.nom:'une flotte')+' — retirez-le d\'abord avant de le réaffecter','red',5000);
+    return;
+  }
+  ch.flotte=fid;
   closeModal('modalAffecterChauffeur');
   renderFlottes(); saveDB();
   showToast('✅ Chauffeur affecté à '+DB.flottes.find(f=>f.id===fid)?.nom,'green');
@@ -3709,29 +3725,38 @@ function retirerPersonnel(pmId,fid){
 // ── Modals d'affectation ──
 function openAffecterCamionModal(){
   if(!selectedFlotteId){showToast("Sélectionnez une flotte d'abord",'amber');return;}
-  // Populate select: camions sans flotte ou d'une autre flotte
+  // Un camion déjà affecté à une flotte ne peut plus être affecté à une autre :
+  // seuls les camions sans flotte apparaissent ici (le retirer de sa flotte le rend à nouveau disponible).
   const sel=document.getElementById('aff-camion-sel');
   if(sel){
-    sel.innerHTML='<option value="">Sélectionner un camion</option>';
-    DB.camions.forEach(c=>{
-      const f=DB.flottes.find(fl=>fl.id===c.flotte);
-      const label=c.immat+' — '+c.marque+(f?' (actuellement: '+f.nom+')':' (sans flotte)');
-      sel.innerHTML+=`<option value="${c.id}">${label}</option>`;
-    });
+    const dispo=DB.camions.filter(c=>!c.flotte);
+    if(!dispo.length){
+      sel.innerHTML='<option value="">Aucun camion disponible (tous déjà affectés à une flotte)</option>';
+    } else {
+      sel.innerHTML='<option value="">Sélectionner un camion</option>';
+      dispo.forEach(c=>{
+        sel.innerHTML+=`<option value="${c.id}">${c.immat} — ${c.marque}</option>`;
+      });
+    }
   }
   openModal('modalAffecterCamion');
 }
 
 function openAffecterChauffeurModal(){
   if(!selectedFlotteId){showToast("Sélectionnez une flotte d'abord",'amber');return;}
+  // Un chauffeur déjà affecté à une flotte ne peut plus être affecté à une autre :
+  // seuls les chauffeurs sans flotte apparaissent ici (le retirer de sa flotte le rend à nouveau disponible).
   const sel=document.getElementById('aff-chauf-sel');
   if(sel){
-    sel.innerHTML='<option value="">Sélectionner un chauffeur</option>';
-    DB.chauffeurs.forEach(c=>{
-      const f=DB.flottes.find(fl=>fl.id===c.flotte);
-      const label=c.prenom+' '+c.nom+(f?' (actuellement: '+f.nom+')':' (sans flotte)');
-      sel.innerHTML+=`<option value="${c.id}">${label}</option>`;
-    });
+    const dispo=DB.chauffeurs.filter(c=>!c.flotte);
+    if(!dispo.length){
+      sel.innerHTML='<option value="">Aucun chauffeur disponible (tous déjà affectés à une flotte)</option>';
+    } else {
+      sel.innerHTML='<option value="">Sélectionner un chauffeur</option>';
+      dispo.forEach(c=>{
+        sel.innerHTML+=`<option value="${c.id}">${c.prenom} ${c.nom}</option>`;
+      });
+    }
   }
   openModal('modalAffecterChauffeur');
 }
@@ -3941,6 +3966,13 @@ function saveCamion(){
   const kmTotal=+v('c-km')||0;
   const derniereVidange=v('c-vidange')||null;
   if(!immat||!marque){alert('Immatriculation et marque requis');return;}
+  // Empêche d'enregistrer deux fois le même camion (même immatriculation, insensible à la casse/espaces)
+  const immatNorm=immat.trim().toUpperCase();
+  const doublon=DB.camions.find(c=>(c.immat||'').trim().toUpperCase()===immatNorm);
+  if(doublon){
+    showToast('⚠️ Ce camion existe déjà (immatriculation '+doublon.immat+') — impossible de l\'enregistrer deux fois','red',5000);
+    return;
+  }
   DB.camions.push({id:++nextId,immat,marque,modele,cap,flotte,statut,kmTotal,kmDepuisVidange:kmTotal,derniereVidange});
   saveDB();
   pushNotification('camion','Nouveau camion ajouté',
@@ -3977,6 +4009,20 @@ function renderChauffeurs(){
 function saveChauffeur(){
   const nom=v('ch-nom'),prenom=v('ch-prenom'),tel=v('ch-tel'),permis=v('ch-permis'),date=v('ch-date'),flotte=v('ch-flotte'),salBase=+v('ch-sal')||2000000,prime=+v('ch-prime')||50000;
   if(!nom||!prenom){alert('Nom et prénom requis');return;}
+  // Empêche d'enregistrer deux fois le même chauffeur : par numéro de permis s'il est renseigné,
+  // sinon par nom + prénom identiques (insensible à la casse/espaces)
+  const permisNorm=(permis||'').trim().toUpperCase();
+  let doublon=null;
+  if(permisNorm){
+    doublon=DB.chauffeurs.find(c=>(c.permis||'').trim().toUpperCase()===permisNorm);
+  } else {
+    const nomNorm=nom.trim().toLowerCase(), prenomNorm=prenom.trim().toLowerCase();
+    doublon=DB.chauffeurs.find(c=>(c.nom||'').trim().toLowerCase()===nomNorm && (c.prenom||'').trim().toLowerCase()===prenomNorm);
+  }
+  if(doublon){
+    showToast('⚠️ Ce chauffeur existe déjà ('+doublon.prenom+' '+doublon.nom+(doublon.permis?' — permis '+doublon.permis:'')+') — impossible de l\'enregistrer deux fois','red',5000);
+    return;
+  }
   DB.chauffeurs.push({id:++nextId,nom,prenom,tel,permis,date,flotte,salBase,prime,voyages:0,statut:'Actif'});
   saveDB();
   pushNotification('chauffeur','Nouveau chauffeur ajouté',
