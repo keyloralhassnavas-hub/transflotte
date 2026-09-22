@@ -743,7 +743,7 @@ tbody tr:hover td{background:#FAFBFC}
         <div class="stat-card amber"><div class="label">Tonnage transporté</div><div class="value" id="s-tonnage">842t</div><div class="sub">Ce mois</div></div>
         <div class="stat-card red"><div class="label">🔧 Alertes maintenance</div><div class="value" id="s-maint-alert">0</div><div class="sub">Camions à entretenir</div></div>
         <div class="stat-card red" style="cursor:pointer" onclick="nav('documents')"><div class="label">📄 Documents à renouveler</div><div class="value" id="s-doc-alert">0</div><div class="sub">Expirés / sous 30j</div></div>
-        <div class="stat-card red"><div class="label">Masse salariale</div><div class="value" id="s-salaire">36.4M</div><div class="sub">GNF ce mois</div></div>
+        <div class="stat-card red"><div class="label">Masse salariale</div><div class="value" id="s-salaire">0 GNF</div><div class="sub">GNF ce mois</div></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
         <div class="card">
@@ -3365,6 +3365,12 @@ function renderDashboard(){
   const elDA=document.getElementById('s-doc-alert');if(elDA)elDA.textContent=docAlertCount;
   const ton=livs.reduce((a,l)=>a+l.tonnage,0);
   document.getElementById('s-tonnage').textContent=ton+'t';
+  // Masse salariale (corrigé le 22/09/2026 : cette carte affichait "36.4M" en dur
+  // dans le HTML depuis le début, jamais reliée aux vraies données — d'où le
+  // montant qui ne disparaissait pas après "Effacer toutes les données").
+  const masseChauffeurs=DB.chauffeurs.filter(c=>c.statut==='Actif').reduce((a,c)=>a+(c.salBase||0),0);
+  const masseEmployes=DB.employes.filter(e=>e.statut==='Actif').reduce((a,e)=>a+(e.salaire||0),0);
+  const elSal=document.getElementById('s-salaire');if(elSal)elSal.textContent=fmtGNF(masseChauffeurs+masseEmployes);
 
   const dispo=cams.filter(c=>c.statut==='Disponible').length;
   const mission=cams.filter(c=>c.statut==='En mission').length;
