@@ -6655,7 +6655,7 @@ function setupOwnerNav(){
     page.innerHTML = `
       <div style="margin-bottom:16px">
         <h2 style="font-size:16px;font-weight:600">🏢 Toutes les entreprises</h2>
-        <p style="font-size:12.5px;color:var(--text-muted);margin-top:4px">Vue d'ensemble, en lecture seule — en tant que propriétaire de la plateforme, vous ne pouvez pas modifier les données d'une entreprise depuis cet écran (uniquement les consulter, pour le support).</p>
+        <p style="font-size:12.5px;color:var(--text-muted);margin-top:4px">Vous pouvez fixer le tarif mensuel par camion et gérer le statut (suspendre, réactiver, bloquer) de chaque entreprise cliente ci-dessous. Vous ne pouvez en revanche pas consulter ni modifier les données opérationnelles d'une entreprise (camions, voyages, etc.) depuis cet écran — uniquement les informations de facturation.</p>
       </div>
       <div class="card">
         <div class="card-header"><h3>Entreprises clientes</h3></div>
@@ -6669,12 +6669,30 @@ function setupOwnerNav(){
 }
 
 // ── Charge et affiche la liste des entreprises (propriétaire uniquement) ──
+// ── Réessaie un appel Supabase une fois de plus après une courte pause avant d'abandonner
+// (absorbe les échecs réseau transitoires du type "Failed to fetch") ──
+async function mtRetry(fn, retries){
+  retries = retries==null ? 1 : retries;
+  let res = await fn();
+  let attempt = 0;
+  while(res.error && attempt < retries){
+    await new Promise(r=>setTimeout(r, 900));
+    res = await fn();
+    attempt++;
+  }
+  return res;
+}
+
 async function renderEntreprisesOwner(){
   const el = document.getElementById('entreprises-owner-body');
   if(!el || !mt || !CLOUD || !CLOUD.isOwner) return;
   el.innerHTML = 'Chargement...';
-  const {data: ents, error} = await mt.from('entreprises').select('*').order('created_at', {ascending:false});
-  if(error){ el.innerHTML = '<p style="color:#C0392B">Erreur de chargement : '+(error.message||JSON.stringify(error))+'</p>'; return; }
+  const {data: ents, error} = await mtRetry(()=>mt.from('entreprises').select('*').order('created_at', {ascending:false}));
+  if(error){
+    el.innerHTML = '<p style="color:#C0392B">Erreur de chargement : '+(error.message||JSON.stringify(error))+'</p>'
+      + '<button class="btn btn-sm" onclick="renderEntreprisesOwner()" style="margin-top:8px">🔄 Réessayer</button>';
+    return;
+  }
   if(!ents || !ents.length){ el.innerHTML = '<p style="padding:20px;color:var(--text-muted)">Aucune entreprise cliente pour le moment.</p>'; return; }
   let html = '<table><thead><tr><th>Entreprise</th><th>Statut</th><th>Tarif / camion (GNF)</th><th>Créée le</th><th>Actions</th></tr></thead><tbody>';
   ents.forEach(function(e){
@@ -6766,8 +6784,12 @@ async function renderFacturationOwner(){
   const el = document.getElementById('facturation-owner-body');
   if(!el || !mt || !CLOUD || !CLOUD.isOwner) return;
   el.innerHTML = 'Chargement...';
-  const {data: facs, error} = await mt.from('factures').select('*,entreprises(nom)').order('mois', {ascending:false});
-  if(error){ el.innerHTML = '<p style="color:#C0392B">Erreur de chargement : '+(error.message||JSON.stringify(error))+'</p>'; return; }
+  const {data: facs, error} = await mtRetry(()=>mt.from('factures').select('*,entreprises(nom)').order('mois', {ascending:false}));
+  if(error){
+    el.innerHTML = '<p style="color:#C0392B">Erreur de chargement : '+(error.message||JSON.stringify(error))+'</p>'
+      + '<button class="btn btn-sm" onclick="renderFacturationOwner()" style="margin-top:8px">🔄 Réessayer</button>';
+    return;
+  }
   _lastFacturesLoaded = facs||[];
   if(!facs || !facs.length){ el.innerHTML = '<p style="padding:20px;color:var(--text-muted)">Aucune facture générée pour le moment. Cliquez sur « Générer les factures du mois ».</p>'; return; }
   let html = '<table><thead><tr><th>Entreprise</th><th>Mois</th><th>Camions</th><th>Tarif unitaire</th><th>Montant</th><th>Statut</th><th>Actions</th></tr></thead><tbody>';
